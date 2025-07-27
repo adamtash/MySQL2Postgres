@@ -1,0 +1,130 @@
+services:
+  # MySQL database for testing
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: test_source
+      MYSQL_USER: testuser
+      MYSQL_PASSWORD: testpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./test-data/01-mysql-init.sql:/docker-entrypoint-initdb.d/01-mysql-init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # PostgreSQL database for testing  
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: test_target
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./test-data/01-postgres-init.sql:/docker-entrypoint-initdb.d/01-postgres-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d test_target"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Migration tool
+  migrator:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # MySQL Connection Configuration
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: test_source
+      MYSQL_USERNAME: testuser
+      MYSQL_PASSWORD: testpass
+      MYSQL_CHARSET: utf8mb4
+      # PostgreSQL Connection Configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: test_target
+      POSTGRES_USERNAME: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_SSLMODE: prefer
+      # Migration Settings
+      BATCH_SIZE: 100
+      MAX_WORKERS: 2
+      LOG_LEVEL: INFO
+      EXCLUDE_TABLES: __efmigrationshistory,__EFMigrationsHistory
+      INCLUDE_TABLES: ""
+      FAIL_ON_MISSING_TABLES: "true"
+      CONTINUE_ON_ERROR: "false"
+      # Optional Settings
+      ENABLE_PROGRESS_BAR: "true"
+      IGNORE_GENERATED_COLUMNS: "true"
+      DISABLE_FOREIGN_KEYS: "true"
+      TRUNCATE_TARGET_TABLES: "true"
+      BACKUP_BEFORE_MIGRATION: "false"
+      CONNECTION_TIMEOUT: 30
+      QUERY_TIMEOUT: 300
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    command: ["python", "cli.py", "--help"]
+
+  # Development environment
+  dev:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # MySQL Connection Configuration
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: test_source
+      MYSQL_USERNAME: testuser
+      MYSQL_PASSWORD: testpass
+      MYSQL_CHARSET: utf8mb4
+      # PostgreSQL Connection Configuration
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: test_target
+      POSTGRES_USERNAME: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_SSLMODE: prefer
+      # Migration Settings
+      BATCH_SIZE: 100
+      MAX_WORKERS: 2
+      LOG_LEVEL: INFO
+      EXCLUDE_TABLES: __efmigrationshistory,__EFMigrationsHistory
+      INCLUDE_TABLES: ""
+      FAIL_ON_MISSING_TABLES: "true"
+      CONTINUE_ON_ERROR: "false"
+      # Optional Settings
+      ENABLE_PROGRESS_BAR: "true"
+      IGNORE_GENERATED_COLUMNS: "true"
+      DISABLE_FOREIGN_KEYS: "true"
+      TRUNCATE_TARGET_TABLES: "true"
+      BACKUP_BEFORE_MIGRATION: "false"
+      CONNECTION_TIMEOUT: 30
+      QUERY_TIMEOUT: 300
+    volumes:
+      - .:/app
+      - /app/venv  # Exclude venv from bind mount
+    command: ["tail", "-f", "/dev/null"]  # Keep container running
+    stdin_open: true
+    tty: true
+
+volumes:
+  mysql_data:
+  postgres_data:

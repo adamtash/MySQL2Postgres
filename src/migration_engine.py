@@ -551,6 +551,11 @@ class MigrationEngine:
                 
                 migration_success = True
                 
+                # Reset auto-increment values after successful migration
+                if migration_success and self.legacy_migrator.reset_auto_increment:
+                    print("🔢 Updating auto-increment values...")
+                    self.legacy_migrator._reset_auto_increment(analysis['table_mappings'])
+                
             finally:
                 # Always re-enable foreign key constraints, even if migration failed
                 if fk_disabled:

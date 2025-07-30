@@ -50,6 +50,7 @@ class MyPg:
         self.ignore_generated_columns = config['migration'].get('ignore_generated_columns', True)
         self.disable_foreign_keys = config['migration'].get('disable_foreign_keys', True)
         self.truncate_target_tables = config['migration'].get('truncate_target_tables', False)
+        self.reset_auto_increment = config['migration'].get('reset_auto_increment', True)
         
         # Database engines and connections
         self.mysql_engine = None
@@ -89,6 +90,32 @@ class MyPg:
         except Exception as e:
             self.logger.log_error("engine_initialization", e, critical=True)
             raise
+    
+    def _get_table_list(self) -> Tuple[List[str], List[str]]:
+        """
+        Get list of tables from both databases.
+        
+        Returns:
+            Tuple of (mysql_tables, postgres_tables)
+        """
+        mysql_tables = []
+        postgres_tables = []
+        
+        try:
+            # Get MySQL tables
+            mysql_inspector = inspect(self.mysql_engine)
+            mysql_tables = mysql_inspector.get_table_names()
+            self.logger.log_info(f"Found {len(mysql_tables)} MySQL tables")
+            
+            # Get PostgreSQL tables
+            postgres_inspector = inspect(self.postgres_engine)
+            postgres_tables = postgres_inspector.get_table_names()
+            self.logger.log_info(f"Found {len(postgres_tables)} PostgreSQL tables")
+            
+        except Exception as e:
+            self.logger.log_error("table_list_retrieval", e, critical=True)
+        
+        return mysql_tables, postgres_tables
     
     def get_postgres_schema(self, table_name: str) -> Optional[Dict]:
         """
@@ -412,6 +439,141 @@ class MyPg:
         except Exception as e:
             self.logger.log_error("truncate_tables", e)
             print(f"⚠️  Warning: Could not truncate tables: {e}")
+            return False
+
+    def _reset_auto_increment(self, table_mappings: Dict[str, str]) -> bool:
+        """
+        Reset PostgreSQL auto-increment values to the correct values after data migration.
+        This handles both IDENTITY columns (PostgreSQL 10+) and SERIAL columns (traditional).
+        
+        Args:
+            table_mappings: Dictionary of mysql_table -> postgres_table mappings
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.postgres_engine.connect() as conn:
+                postgres_tables = list(set(table_mappings.values()))
+                sequences_reset = 0
+                
+                print(f"🔢 Resetting auto-increment values for {len(postgres_tables)} tables...")
+                
+                # First, find all IDENTITY columns (PostgreSQL 10+)
+                identity_query = text("""
+                    SELECT 
+                        t.table_name,
+                        c.column_name,
+                        c.identity_generation,
+                        CASE WHEN c.identity_start IS NOT NULL THEN c.identity_start::bigint ELSE 1 END as identity_start,
+                        CASE WHEN c.identity_increment IS NOT NULL THEN c.identity_increment::bigint ELSE 1 END as identity_increment
+                    FROM information_schema.tables t
+                    JOIN information_schema.columns c ON t.table_name = c.table_name
+                    WHERE t.table_schema = 'public'
+                    AND c.table_schema = 'public'
+                    AND c.identity_generation IS NOT NULL
+                    AND c.identity_generation IN ('ALWAYS', 'BY DEFAULT')
+                    ORDER BY t.table_name, c.column_name
+                """)
+                
+                identity_columns = list(conn.execute(identity_query))
+                self.logger.log_debug(f"Found {len(identity_columns)} IDENTITY columns in database")
+                
+                # Process IDENTITY columns
+                for table_name, column_name, generation, start_val, increment_val in identity_columns:
+                    table_name_clean = table_name.strip('"')
+                    
+                    # Only process tables that are in our migration
+                    if table_name_clean not in [t.strip('"') for t in postgres_tables]:
+                        continue
+                        
+                    # Get the maximum ID value from the table
+                    max_id_query = text(f'SELECT COALESCE(MAX("{column_name}"), 0) FROM "{table_name_clean}"')
+                    max_id_result = conn.execute(max_id_query)
+                    max_id = max_id_result.scalar()
+                    
+                    if max_id > 0:
+                        # Reset the identity sequence to max_id + 1
+                        next_val = max_id + 1
+                        # Note: ALTER TABLE RESTART WITH doesn't support parameter binding
+                        restart_query = text(f'ALTER TABLE "{table_name_clean}" ALTER COLUMN "{column_name}" RESTART WITH {next_val}')
+                        conn.execute(restart_query)
+                        
+                        sequences_reset += 1
+                        self.logger.log_debug(f"Reset IDENTITY sequence for table '{table_name_clean}' column '{column_name}' to {next_val}")
+                        print(f"  ✓ Reset IDENTITY sequence for {table_name_clean}.{column_name} to {next_val}")
+                    else:
+                        self.logger.log_debug(f"Empty table {table_name_clean}, keeping default IDENTITY start value")
+                        print(f"  ⚠️  {table_name_clean}: Empty table, keeping default IDENTITY start value")
+                
+                # Now find any remaining SERIAL columns (for backward compatibility)
+                for table_name in postgres_tables:
+                    table_name_clean = table_name.strip('"')
+                    
+                    # Skip tables that already had IDENTITY columns processed
+                    identity_table_names = [t[0] for t in identity_columns]
+                    if table_name_clean in identity_table_names:
+                        continue
+                    
+                    self.logger.log_debug(f"Processing SERIAL sequences for table: {table_name}")
+                    
+                    # Find SERIAL columns (traditional approach)
+                    sequence_query = text("""
+                        SELECT 
+                            a.attname as column_name,
+                            pg_get_serial_sequence(:schema_table, a.attname) as sequence_name
+                        FROM pg_class c
+                        JOIN pg_attribute a ON c.oid = a.attrelid
+                        JOIN pg_namespace n ON c.relnamespace = n.oid
+                        WHERE c.relname = :table_name_lower
+                        AND n.nspname = 'public'
+                        AND a.attnum > 0
+                        AND NOT a.attisdropped
+                        AND pg_get_serial_sequence(:schema_table, a.attname) IS NOT NULL
+                    """)
+                    
+                    schema_table = f'public."{table_name_clean}"'
+                    
+                    result = conn.execute(sequence_query, {
+                        "table_name_lower": table_name_clean.lower(),
+                        "schema_table": schema_table
+                    })
+                    sequences = list(result)
+                    
+                    self.logger.log_debug(f"Found {len(sequences)} SERIAL sequences for table '{table_name}'")
+                    
+                    for row in sequences:
+                        column_name, sequence_name = row
+                        
+                        if sequence_name:
+                            # Get the maximum ID value from the table
+                            max_id_query = text(f'SELECT COALESCE(MAX("{column_name}"), 0) FROM "{table_name_clean}"')
+                            max_id_result = conn.execute(max_id_query)
+                            max_id = max_id_result.scalar()
+                            
+                            # Reset the sequence to max_id + 1
+                            next_val = max(max_id + 1, 1)
+                            setval_query = text(f"SELECT setval('{sequence_name}', :max_val)")
+                            conn.execute(setval_query, {"max_val": next_val})
+                            
+                            sequences_reset += 1
+                            self.logger.log_debug(f"Reset SERIAL sequence '{sequence_name}' for table '{table_name}' to {next_val}")
+                            print(f"  ✓ Reset SERIAL sequence for {table_name_clean}.{column_name} to {next_val}")
+                
+                conn.commit()
+                
+                if sequences_reset > 0:
+                    self.logger.log_info(f"Reset {sequences_reset} auto-increment values")
+                    print(f"✅ Reset {sequences_reset} auto-increment values to correct values")
+                else:
+                    self.logger.log_info("No auto-increment columns found to reset")
+                    print("ℹ️  No auto-increment columns found to reset")
+                
+                return True
+                
+        except Exception as e:
+            self.logger.log_error("reset_auto_increment", e)
+            print(f"⚠️  Warning: Could not reset auto-increment values: {e}")
             return False
     
     def migrate_table(self, mysql_table: str, postgres_table: str, 

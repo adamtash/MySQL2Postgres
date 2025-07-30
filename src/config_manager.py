@@ -93,6 +93,7 @@ class ConfigManager:
             'ignore_generated_columns': self._get_env('IGNORE_GENERATED_COLUMNS', 'true').lower() == 'true',
             'disable_foreign_keys': self._get_env('DISABLE_FOREIGN_KEYS', 'true').lower() == 'true',
             'truncate_target_tables': self._get_env('TRUNCATE_TARGET_TABLES', 'false').lower() == 'true',
+                        'reset_auto_increment': self._get_env('RESET_AUTO_INCREMENT', 'true').lower() == 'true',
             'backup_before_migration': self._get_env('BACKUP_BEFORE_MIGRATION', 'true').lower() == 'true',
             'connection_timeout': int(self._get_env('CONNECTION_TIMEOUT', '30')),
             'query_timeout': int(self._get_env('QUERY_TIMEOUT', '300'))

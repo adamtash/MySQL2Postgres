@@ -44,6 +44,7 @@ Examples:
   %(prog)s --migrate --batch-size 500        Execute migration with custom batch size
   %(prog)s --dry-run --log-level DEBUG       Simulate migration with debug logging
   %(prog)s --validate                         Validate migration results
+  %(prog)s --reset-auto-increment             Reset auto-increment values for previously migrated databases
   %(prog)s --setup                           Run setup wizard
             """
         )
@@ -78,7 +79,12 @@ Examples:
         action_group.add_argument(
             '--setup', '-s',
             action='store_true',
-            help='Run setup wizard'
+            help='Run configuration setup wizard'
+        )
+        action_group.add_argument(
+            '--reset-auto-increment',
+            action='store_true',
+            help='Reset PostgreSQL auto-increment values only (for previously migrated databases)'
         )
         
         # Configuration overrides
@@ -252,6 +258,68 @@ Examples:
             self.error_collector.add_error('VALIDATION_ERROR', str(e), critical=True)
             self.error_collector.print_summary()
     
+    def run_reset_auto_increment(self, config: dict):
+        """Reset PostgreSQL auto-increment values only."""
+        print("🔢 Starting Auto-Increment Reset...")
+        
+        try:
+            from src.legacy_migrator import MyPg
+            
+            # Initialize legacy migrator
+            migrator = MyPg(config)
+            
+            # Get table list and mappings
+            mysql_tables, postgres_tables = migrator._get_table_list()
+            
+            # Filter tables based on configuration
+            exclude_tables = set(config['migration'].get('exclude_tables', []))
+            include_tables = set(config['migration'].get('include_tables', []))
+            
+            if include_tables:
+                tables_to_process = [t for t in mysql_tables if t in include_tables]
+            else:
+                tables_to_process = [t for t in mysql_tables if t not in exclude_tables]
+            
+            # Create table mappings (mysql -> postgres)
+            table_mappings = {}
+            postgres_table_set = set(postgres_tables)
+            
+            for mysql_table in tables_to_process:
+                # Try exact match first
+                if mysql_table in postgres_table_set:
+                    table_mappings[mysql_table] = mysql_table
+                else:
+                    # Try case-insensitive match
+                    postgres_match = None
+                    for postgres_table in postgres_tables:
+                        if postgres_table.lower() == mysql_table.lower():
+                            postgres_match = postgres_table
+                            break
+                    
+                    if postgres_match:
+                        table_mappings[mysql_table] = postgres_match
+                    else:
+                        print(f"⚠️  Warning: No PostgreSQL table found for MySQL table '{mysql_table}'")
+            
+            if not table_mappings:
+                print("❌ No matching tables found for auto-increment reset")
+                return
+            
+            print(f"📊 Found {len(table_mappings)} tables to process")
+            
+            # Reset auto-increment values
+            success = migrator._reset_auto_increment(table_mappings)
+            
+            if success:
+                print("✅ Auto-increment reset completed successfully!")
+            else:
+                print("❌ Auto-increment reset completed with warnings!")
+                
+        except Exception as e:
+            print(f"❌ Auto-increment reset error: {e}")
+            self.error_collector.add_error('AUTO_INCREMENT_RESET_ERROR', str(e), critical=True)
+            self.error_collector.print_summary()
+    
     def run_setup(self):
         """Run setup wizard."""
         print("🛠️  Starting Setup Wizard...")
@@ -292,6 +360,8 @@ Examples:
                 self.run_migration(config, dry_run=True)
             elif args.validate:
                 self.run_validation(config)
+            elif args.reset_auto_increment:
+                self.run_reset_auto_increment(config)
                 
         except KeyboardInterrupt:
             print("\n⚠️  Operation cancelled by user")

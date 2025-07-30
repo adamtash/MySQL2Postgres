@@ -19,6 +19,7 @@ This tool was specifically designed to facilitate data migrations from Entity Fr
 - Foreign key constraint management
 - Case-insensitive table name mapping
 - Generated column detection and exclusion
+- Automatic sequence/identity column value resetting
 - Dry-run mode for testing
 - Progress monitoring and logging
 
@@ -122,6 +123,7 @@ BATCH_SIZE=100
 EXCLUDE_TABLES=table1,table2
 IGNORE_GENERATED_COLUMNS=true
 DISABLE_FOREIGN_KEYS=true
+RESET_AUTO_INCREMENT=true
 TRUNCATE_TARGET_TABLES=false
 ```
 
@@ -140,6 +142,9 @@ python cli.py --dry-run
 # Execute the migration
 python cli.py --migrate
 
+# Reset auto-increment values only (for previously migrated databases)
+python cli.py --reset-auto-increment
+
 # Validate migration results
 python cli.py --validate
 ```
@@ -152,6 +157,7 @@ python cli.py --validate
 | `--test-connections` | Test database connectivity |
 | `--dry-run` | Simulate migration without making changes |
 | `--migrate` | Execute the data migration |
+| `--reset-auto-increment` | Reset PostgreSQL auto-increment values only (for previously migrated databases) |
 | `--validate` | Verify migration results |
 | `--config` | Display current configuration |
 
@@ -169,6 +175,7 @@ python cli.py --validate
 - **Schema Migration**: This tool only migrates data. You must create the PostgreSQL schema manually or using tools like EF Core before running the migration.
 - **Foreign Keys**: The tool can automatically disable foreign key constraints during migration and re-enable them afterward.
 - **Generated Columns**: PostgreSQL generated columns are automatically detected and excluded from data insertion.
+- **Auto-Increment Reset**: After migration, PostgreSQL auto-increment values (SERIAL/IDENTITY columns) are automatically reset to the correct next values to prevent ID conflicts on future inserts. For databases migrated before this feature was added, use `--reset-auto-increment` to update existing databases.
 - **Table Names**: The tool handles case-sensitive table name mapping between MySQL and PostgreSQL.
 
 ## License
